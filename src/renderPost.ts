@@ -249,6 +249,28 @@ function extractAttachmentFileName(attachmentUrl: string): string | undefined {
   return parts.slice(2).join(':')
 }
 
+function extractAttachmentWidth(attachmentUrl: string): string | undefined {
+  const query = attachmentUrl.split('?')[1]
+  if (!query) return undefined
+  const params = new URLSearchParams(query)
+  return params.get('width') || undefined
+}
+
+function buildNotionImageProxyUrl(
+  attachmentUrl: string,
+  blockIdNoDash: string
+): string {
+  const attachmentBase = attachmentUrl.split('?')[0]
+  const width = extractAttachmentWidth(attachmentUrl)
+  const params = new URLSearchParams()
+  params.set('table', 'block')
+  params.set('id', blockIdNoDash)
+  if (width) params.set('width', width)
+  return `https://www.notion.so/image/${encodeURIComponent(
+    attachmentBase
+  )}?${params.toString()}`
+}
+
 function hashString(input: string): string {
   return crypto.createHash('sha1').update(input).digest('hex')
 }
@@ -258,14 +280,21 @@ async function getSignedFileUrls(
 ): Promise<Map<string, string>> {
   if (requests.length === 0) return new Map()
   const body = JSON.stringify({ urls: requests })
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(body).toString(),
+  }
+  const tokenV2 = process.env.NOTION_TOKEN_V2 || process.env.NOTION_TOKEN
+  if (tokenV2) {
+    headers['Cookie'] = `token_v2=${tokenV2}`
+  } else {
+    log.warn('NOTION_TOKEN_V2 is not set; signed URLs may be unavailable')
+  }
   const options = {
     method: 'POST',
     hostname: 'www.notion.so',
     path: '/api/v3/getSignedFileUrls',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(body),
-    },
+    headers,
   }
 
   const response = await new Promise<unknown>((resolve, reject) => {
@@ -286,29 +315,50 @@ async function getSignedFileUrls(
   })
 
   const map = new Map<string, string>()
-  const signedUrls =
-    (response as { signedUrls?: { url: string; signedUrl: string }[] })
-      .signedUrls || []
-  signedUrls.forEach(item => {
-    if (item?.url && item?.signedUrl) {
-      map.set(item.url, item.signedUrl)
-    }
-  })
+  const raw = (response as { signedUrls?: unknown }).signedUrls
+  const signedUrls = Array.isArray(raw) ? raw : []
+  if (signedUrls.length > 0 && typeof signedUrls[0] === 'string') {
+    signedUrls.forEach((item, index) => {
+      if (typeof item === 'string' && requests[index]) {
+        map.set(requests[index].url, item)
+      }
+    })
+  } else {
+    signedUrls.forEach(item => {
+      const obj = item as { url?: string; signedUrl?: string }
+      if (obj?.url && obj?.signedUrl) {
+        map.set(obj.url, obj.signedUrl)
+      }
+    })
+  }
   if (signedUrls.length === 0) {
     log.warn('No signed URLs returned from Notion API')
   }
   return map
 }
 
-async function downloadToFile(url: string, filePath: string): Promise<void> {
+async function downloadToFile(
+  url: string,
+  filePath: string,
+  headers?: Record<string, string>
+): Promise<void> {
   await fsPromises.mkdir(path.dirname(filePath), { recursive: true })
   if (fs.existsSync(filePath)) return
 
   const client = url.startsWith('https:') ? https : http
   await new Promise<void>((resolve, reject) => {
-    const request = client.get(url, response => {
-      if (response.statusCode && response.statusCode >= 400) {
-        reject(new Error(`Failed to download ${url}: ${response.statusCode}`))
+    const request = client.get(url, { headers }, response => {
+      const status = response.statusCode || 0
+      if (status >= 300 && status < 400 && response.headers.location) {
+        const redirected = new URL(response.headers.location, url).toString()
+        response.resume()
+        downloadToFile(redirected, filePath, headers)
+          .then(resolve)
+          .catch(reject)
+        return
+      }
+      if (status >= 400) {
+        reject(new Error(`Failed to download ${url}: ${status}`))
         return
       }
       const fileStream = fs.createWriteStream(filePath)
@@ -353,42 +403,46 @@ async function resolveAttachmentImages(
   const signedUrlMap = await getSignedFileUrls(
     attachments.flatMap(item => {
       const baseUrl = item.attachmentUrl.split('?')[0]
-      const urls =
-        baseUrl === item.attachmentUrl
-          ? [item.attachmentUrl]
-          : [item.attachmentUrl, baseUrl]
-      return urls.flatMap(url => [
+      return [
         {
-          url,
+          url: baseUrl,
           permissionRecord: { table: 'block' as const, id: item.blockId },
         },
         {
-          url,
+          url: baseUrl,
           permissionRecord: { table: 'block' as const, id: item.blockIdNoDash },
         },
-      ])
+      ]
     })
   )
 
   const assetsDir = path.join(outDir, 'assets', 'notion')
+  const tokenV2 = process.env.NOTION_TOKEN_V2 || process.env.NOTION_TOKEN
+  const downloadHeaders = tokenV2
+    ? { Cookie: `token_v2=${tokenV2}` }
+    : undefined
   for (const item of attachments) {
     const attachmentBase = item.attachmentUrl.split('?')[0]
-    const signedUrl =
-      signedUrlMap.get(item.attachmentUrl) || signedUrlMap.get(attachmentBase)
-    if (!signedUrl) {
-      log.warn(
-        `No signed URL for attachment: ${item.attachmentUrl} (block ${item.blockId})`
-      )
-      continue
-    }
+    const signedUrl = signedUrlMap.get(attachmentBase)
+    const resolvedUrl = signedUrl
+      ? signedUrl
+      : buildNotionImageProxyUrl(item.attachmentUrl, item.blockIdNoDash)
     const attachmentFileName = extractAttachmentFileName(item.attachmentUrl)
     const ext =
       (attachmentFileName && path.extname(attachmentFileName)) ||
-      path.extname(new URL(signedUrl).pathname) ||
+      path.extname(new URL(resolvedUrl).pathname) ||
       '.bin'
     const fileName = `${hashString(item.attachmentUrl)}${ext}`
     const outPath = path.join(assetsDir, fileName)
-    await downloadToFile(signedUrl, outPath)
+    try {
+      await downloadToFile(resolvedUrl, outPath, downloadHeaders)
+    } catch (error) {
+      log.warn(
+        `Failed to download attachment: ${item.attachmentUrl} (block ${item.blockId})`
+      )
+      log.warn(error)
+      continue
+    }
     item.node.source = `/assets/notion/${fileName}`
   }
 }
