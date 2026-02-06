@@ -183,7 +183,6 @@ export async function renderPost(task: RenderPostTask): Promise<number> {
           siteContext
         ) as unknown as import('unist-util-visit').Visitor<import('unist').Node>
       )
-      await resolveAttachmentImages(tree, config.outDir)
       cache.set('notion', pageID, tree)
 
       log.info(`Cache of "${pageID}" is saved`)
@@ -197,6 +196,8 @@ export async function renderPost(task: RenderPostTask): Promise<number> {
         throw new Error(`\
 Cache of page "${pageID}" is corrupted, run "notablog generate --fresh <path_to_starter>" to fix`)
     }
+
+    await resolveAttachmentImages(tree, config.outDir)
 
     /** Render with template. */
     if (pageMetadata.publish) {
