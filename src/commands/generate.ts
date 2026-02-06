@@ -2,7 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import { createAgent } from 'notionapi-agent'
 import { TaskManager2 } from '@dnpr/task-manager'
-import { copyDirSync } from '@dnpr/fsutil'
+import { copyDirSync as copyDirSyncRaw } from '@dnpr/fsutil'
 
 import { Cache } from '../cache'
 import { Config } from '../config'
@@ -13,6 +13,8 @@ import { renderPost } from '../renderPost'
 import { log, parseJSON } from '../utils/misc'
 import { toDashID } from '../utils/notion'
 import { RenderPostTask, ThemeConfig } from '../types'
+
+const copyDirSync = copyDirSyncRaw as (src: string, dest: string) => void
 
 type GenerateOptions = {
   /** Concurrency for Notion page downloading and rendering. */
@@ -64,11 +66,12 @@ export async function generate(
     throw new Error(`Cannot find layouts/ in theme "${theme}"`)
   }
   const themeManifestPath = path.join(themeDir, 'manifest.json')
-  const themeManifest = parseJSON(
+  const themeManifestRaw = parseJSON(
     fs.readFileSync(themeManifestPath, { encoding: 'utf-8' })
-  ) as ThemeConfig
-  if (!themeManifest)
+  )
+  if (!themeManifestRaw)
     throw new Error(`The theme is not supported by Notablog v0.6.0 or above.`)
+  const themeManifest = themeManifestRaw as ThemeConfig
   // const templateEngine = themeManifest.templateEngine
   const renderStrategy = new EJSStrategy(templateDir)
   const renderer = new Renderer(renderStrategy)
@@ -132,46 +135,40 @@ export async function generate(
   const tm2 = new TaskManager2({ concurrency })
   const tasks = []
   pagesUpdated.forEach(pageMetadata => {
-    tasks.push(
-      tm2.queue(renderPost, [
-        {
-          data: {
-            siteContext,
-            pageMetadata,
-            doFetchPage: true,
-          },
-          tools: {
-            renderer,
-            notionAgent,
-            cache,
-          },
-          config: {
-            ...dirs,
-          },
-        } as RenderPostTask,
-      ]) as never
-    )
+    const task: RenderPostTask = {
+      data: {
+        siteContext,
+        pageMetadata,
+        doFetchPage: true,
+      },
+      tools: {
+        renderer,
+        notionAgent,
+        cache,
+      },
+      config: {
+        ...dirs,
+      },
+    }
+    tasks.push(tm2.queue(() => renderPost(task), []))
   })
   pagesNotUpdated.forEach(pageMetadata => {
-    tasks.push(
-      tm2.queue(renderPost, [
-        {
-          data: {
-            siteContext,
-            pageMetadata,
-            doFetchPage: false,
-          },
-          tools: {
-            renderer,
-            notionAgent,
-            cache,
-          },
-          config: {
-            ...dirs,
-          },
-        } as RenderPostTask,
-      ]) as never
-    )
+    const task: RenderPostTask = {
+      data: {
+        siteContext,
+        pageMetadata,
+        doFetchPage: false,
+      },
+      tools: {
+        renderer,
+        notionAgent,
+        cache,
+      },
+      config: {
+        ...dirs,
+      },
+    }
+    tasks.push(tm2.queue(() => renderPost(task), []))
   })
   await Promise.all(tasks)
   return 0

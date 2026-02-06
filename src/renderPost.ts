@@ -177,7 +177,12 @@ export async function renderPost(task: RenderPostTask): Promise<number> {
 
       tree = await getOnePageAsTree(pageID, notionAgent)
       /** Use internal links for pages in the table. */
-      visit(tree, createLinkTransformer(siteContext))
+      visit(
+        tree as unknown as import('unist').Node,
+        createLinkTransformer(
+          siteContext
+        ) as unknown as import('unist-util-visit').Visitor<import('unist').Node>
+      )
       await resolveAttachmentImages(tree, config.outDir)
       cache.set('notion', pageID, tree)
 
