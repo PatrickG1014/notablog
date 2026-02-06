@@ -72,6 +72,7 @@ export async function generate(
   if (!themeManifestRaw)
     throw new Error(`The theme is not supported by Notablog v0.6.0 or above.`)
   const themeManifest = themeManifestRaw as ThemeConfig
+  void themeManifest
   // const templateEngine = themeManifest.templateEngine
   const renderStrategy = new EJSStrategy(templateDir)
   const renderer = new Renderer(renderStrategy)
@@ -133,7 +134,7 @@ export async function generate(
   log.info(`${pagePublishedCount} of ${pageTotalCount} posts are published`)
 
   const tm2 = new TaskManager2({ concurrency })
-  const tasks = []
+  const tasks: Promise<unknown>[] = []
   pagesUpdated.forEach(pageMetadata => {
     const task: RenderPostTask = {
       data: {
