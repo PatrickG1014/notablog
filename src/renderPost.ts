@@ -294,6 +294,9 @@ async function getSignedFileUrls(
       map.set(item.url, item.signedUrl)
     }
   })
+  if (signedUrls.length === 0) {
+    log.warn('No signed URLs returned from Notion API')
+  }
   return map
 }
 
@@ -324,6 +327,7 @@ async function resolveAttachmentImages(
   const attachments: {
     node: NAST.Image
     blockId: string
+    blockIdNoDash: string
     attachmentUrl: string
   }[] = []
 
@@ -336,6 +340,7 @@ async function resolveAttachmentImages(
           attachments.push({
             node: image,
             blockId,
+            blockIdNoDash: blockId.replace(/-/g, ''),
             attachmentUrl: image.source,
           })
         }
@@ -346,15 +351,30 @@ async function resolveAttachmentImages(
   if (attachments.length === 0) return
 
   const signedUrlMap = await getSignedFileUrls(
-    attachments.map(item => ({
-      url: item.attachmentUrl,
-      permissionRecord: { table: 'block', id: item.blockId },
-    }))
+    attachments.flatMap(item => {
+      const baseUrl = item.attachmentUrl.split('?')[0]
+      const urls =
+        baseUrl === item.attachmentUrl
+          ? [item.attachmentUrl]
+          : [item.attachmentUrl, baseUrl]
+      return urls.flatMap(url => [
+        {
+          url,
+          permissionRecord: { table: 'block' as const, id: item.blockId },
+        },
+        {
+          url,
+          permissionRecord: { table: 'block' as const, id: item.blockIdNoDash },
+        },
+      ])
+    })
   )
 
   const assetsDir = path.join(outDir, 'assets', 'notion')
   for (const item of attachments) {
-    const signedUrl = signedUrlMap.get(item.attachmentUrl)
+    const attachmentBase = item.attachmentUrl.split('?')[0]
+    const signedUrl =
+      signedUrlMap.get(item.attachmentUrl) || signedUrlMap.get(attachmentBase)
     if (!signedUrl) {
       log.warn(
         `No signed URL for attachment: ${item.attachmentUrl} (block ${item.blockId})`
